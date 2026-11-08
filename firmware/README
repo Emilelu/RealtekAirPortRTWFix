@@ -1,0 +1,19 @@
+Place Realtek firmware blobs here before building the kext bundle.
+These are NOT included in the repo (licensing). Obtain from:
+  linux-firmware (https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git)
+  path: rtw88/
+
+Files needed (copy all that apply to your chip):
+  rtw8822b_fw.bin   — RTL8822BE / RTL8822BU
+  rtw8822c_fw.bin   — RTL8822CE / RTL8822CU
+  rtw8821c_fw.bin   — RTL8821CE / RTL8821CU
+  rtw8812a_fw.bin   — RTL8812AE / RTL8812AU
+  rtw8814a_fw.bin   — RTL8814AE / RTL8814AU
+  rtw8821a_fw.bin   — RTL8821AU
+
+The build embeds firmware/*.bin as compressed blobs in the kext binary.
+Beta 4 bootstrap downloads RTL8814A firmware from lwfinger/rtw88 commit
+a56bcd26e770257612a0803249cbd4095fc6feca and verifies SHA-256:
+aa6bf9d62b2d2d8a37254fd6d917ba2839888cdedc21850d4481874cb1d3d7cb.
+Only the enabled PCIe chips are advertised by AirPortRTW; the other firmware
+names above are reference information, not a claim of macOS support.

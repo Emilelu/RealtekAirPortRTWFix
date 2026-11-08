@@ -1,0 +1,103 @@
+name: AirPortRTW build and release
+
+on:
+  push:
+    branches: [main, 1.0.0-beta, native-airport-integration]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: SAE, handshake, encryption and replay tests
+        env:
+          SAE_HOST_SANITIZE: '1'
+        run: python3 experimental/wpa3/test_host.py
+      - name: Driver regression checks
+        run: |
+          for test in tests/check_*.py; do
+            if [[ "$test" == tests/check_stack_budget.py ]]; then
+              python3 "$test" --self-test
+            else
+              python3 "$test"
+            fi
+          done
+      - name: Bootstrap dependencies
+        run: ./scripts/bootstrap-deps.sh
+      - name: Build driver and check optional diagnostic source
+        run: |
+          make airport
+          xcrun clang -Wall -Wextra -Werror -arch x86_64 -mmacosx-version-min=13.0 ctl/roam-test.c -framework IOKit -framework CoreFoundation -o build/out/rtw88-roam
+          build/out/rtw88-roam --help
+      - name: Verify native bundle and kernel stack
+        run: |
+          plutil -lint build/out/AirPortRTW.kext/Contents/Info.plist
+          lipo build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW -verify_arch x86_64
+          python3 tests/check_stack_budget.py build/out/AirPortRTW.kext/Contents/MacOS/AirPortRTW
+          python3 - <<'CHECK'
+          import plistlib, re, subprocess
+          from pathlib import Path
+          bundle = Path('build/out/AirPortRTW.kext')
+          info = plistlib.loads((bundle / 'Contents/Info.plist').read_bytes())
+          assert info['CFBundleVersion'] == info['CFBundleShortVersionString'] == '1.2.0'
+          assert 'beta' not in info['CFBundleGetInfoString'].lower()
+          assert 'com.apple.iokit.IO80211FamilyLegacy' in info['OSBundleLibraries']
+          personality = info['IOKitPersonalities']['AirPortRTW_8821CE']
+          assert all(personality[key] is True for key in ['RoamingAssistEnabled', 'RoamingSwitchEnabled', 'RoamingAutoEnabled'])
+          assert info['IOKitPersonalities']['AirPortRTW_8814AE']['IOPCIMatch'] == '0x881310EC'
+          binary = str(bundle / 'Contents/MacOS/AirPortRTW')
+          unresolved = subprocess.check_output(['nm', '-u', binary], text=True)
+          assert not any(name in unresolved for name in ['_rtw_sae_', '_airport_sae_', '_mbedtls_', 'RTW88WPA3'])
+          defined = subprocess.check_output(['nm', binary], text=True)
+          assert '_rtw_sae_begin' in defined and '_rtw8814a_hw_spec' in defined
+          strings = subprocess.check_output(['strings', binary], text=True)
+          assert '1.2.0' in strings.splitlines()
+          assert '1.2.0-beta.' not in strings and '1.2.0b15' not in strings
+          for name in ['-rtwnoautoroam', '-rtwsaeswccmp', '-rtwswscan', '-rtwnoawdlhop', 'btm-response-acked', 'ROAM_K_BEACON_ADVERTISED', 'TX_BATCH_DEFERRED_FRAMES', 'AWDL_POWER_SUSPENDED', 'RX_DEFER_MODE', 'STA_LINK_EVENT_TLV_BYTES', 'rtw8814a_fw.bin']:
+              assert name in strings, name
+          assembly = subprocess.check_output(['xcrun', 'otool', '-tvV', 'build/airport/RTW88WPA3Crypto.o'], text=True)
+          assert not re.search(r'%(?:xmm|ymm|zmm)[0-9]+', assembly)
+          symbols = subprocess.check_output(['nm', 'build/airport/RTW88WPA3Crypto.o'], text=True)
+          assert not any(name in symbols for name in ['__cxx_global_var_init', '_GLOBAL__sub_I', '__cxa_guard'])
+          print('PASS: release version, native symbols, driver options and scalar kernel CCMP')
+          CHECK
+      - name: Package minimal release and verify contents
+        run: python3 scripts/package-release.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AirPortRTW-1.2.0
+          path: |
+            build/AirPortRTW-1.2.0.zip
+            build/AirPortRTW-1.2.0.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && github.event.head_commit.message == 'Release AirPort-RTW 1.2.0'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: AirPortRTW-1.2.0
+          path: release-assets
+      - name: Verify download and release contents
+        run: |
+          (cd release-assets && sha256sum -c AirPortRTW-1.2.0.zip.sha256)
+          python3 scripts/package-release.py --verify release-assets/AirPortRTW-1.2.0.zip
+      - name: Publish AirPort-RTW 1.2.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v1.2.0 --draft --target "$GITHUB_SHA" --title "AirPort-RTW 1.2.0" --notes-file RELEASE_1_2_0.md
+          gh release upload v1.2.0 release-assets/AirPortRTW-1.2.0.zip release-assets/AirPortRTW-1.2.0.zip.sha256
+          gh release edit v1.2.0 --draft=false --latest
